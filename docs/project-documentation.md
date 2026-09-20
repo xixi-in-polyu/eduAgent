@@ -26,7 +26,7 @@
 | AI 问答与会话（`lib/services/chatService.ts`、`lib/agent/`、`src/rag_service/main.py`） | 课程成员、问答中心用户、个人知识库用户 | 问题、会话和附件 → Redis 历史与 PostgreSQL 记忆 → ReAct 工具 → RAG/LLM → SSE 文本、工具事件和引用；`QaLog` 与线程标题持久化 | 会话越权、无可用资料、模型/检索失败、流中断、工具参数或审批失败 |
 | 作业（`lib/services/assignmentService.ts`、`src/rag_mvp/assignment_gen.py`） | 教师生成、编辑、发布题目，学生查看 | 教师自然语言要求/结构参数 → Redis 任务 → 候选知识检索、规划、出题、评审/修复 → 草稿；教师可改题、重生成、补全并发布；输出题目与质量/采纳信息 | 空要求、无资料/生成失败、非草稿修改、并发发布冲突 |
 | 提交与批改（`lib/services/submissionService.ts`、`lib/services/grading/grading-strategies.ts`） | 学生作答，教师复核 | 答案 → 唯一提交记录 → 客观题自动比对、主观题 LLM 评分 → 教师改分/返还；输出分数、反馈及状态 | 过期/未发布作业、重复并发提交、旧批改覆盖、评分服务失败；主观题失败可给参考分并提示复核 |
-| 学习记忆与每日复习（`lib/agent/memory/`、`lib/services/memoryReviewService.ts`、`scripts/review-scheduler.ts`） | 用户沉淀知识点并复习 | 会话事实/概念 → 用户画像和掌握度；定时调度按用户本地时间生成题组 → 答题即时判分并更新掌握度；输出待复习题和结果 | 无概念/无题、模型失败、过期或重复答题、关闭会话；无答题不更新掌握度 |
+| 学习记忆与每日复习（`lib/agent/memory/`、`lib/services/memoryReviewService.ts`、`scripts/review-scheduler.mjs`） | 用户沉淀知识点并复习 | 会话事实/概念 → 用户画像和掌握度；定时调度按用户本地时间生成题组 → 答题即时判分并更新掌握度；输出待复习题和结果 | 无概念/无题、模型失败、过期或重复答题、关闭会话；无答题不更新掌握度 |
 | 通知与分析（`lib/services/notificationService.ts`、`analyticsService.ts`） | 用户接收事件；教师查看课程/作业分析 | 材料/作业/评分事件写 PostgreSQL，Redis Pub/Sub 推送 SSE；问答及作业记录聚合为统计 | Pub/Sub 失败时数据库通知仍可查询；统计依赖已写入的数据；课程分析的 `weak_concepts` 当前固定为空数组 |
 
 **主要 Use Case**：教师创建课程和课节 → 上传资料并等待 `READY` → 分享码让学生选课 → 学生阅读资料并提问 → 教师按资料生成并发布作业 → 学生提交 → 系统初评 → 教师复核返还 → 学生查看分数和反馈，并在个人知识库、问答中心或每日复习中继续学习。上述链路由多个模块组合而成，跨模块端到端成功率无法从当前项目确认。
@@ -48,7 +48,7 @@
 
 ## 3. 系统架构
 
-**实际形态**：Next.js App Router 同时提供 React 前端和 Route Handlers；Prisma 管业务 PostgreSQL。TypeScript Agent 位于 Web 服务内。FastAPI RAG 服务提供检索/生成等内部 HTTP 接口；独立 Python Worker 消费 Redis Stream。RAG 向量表由 Python `vector_store.ensure_schema()` 管理，可经 `RAG_PG_DSN` 指向另一 PostgreSQL 数据库。Redis 还保存 24 小时对话历史、短期审批记录与通知 Pub/Sub。文件进 MinIO；附件图片在配置完整时可进腾讯 COS。LLM/Embedding 可使用 OpenAI 兼容端点或 Ollama；解析可用 MinerU 本地/云端，音视频转录依赖 ffmpeg/faster-whisper。依据：`edu-platform/docker-compose.yml`、`lib/agent/llm-registry.ts`、`src/rag_mvp/config.py`、`document_parser.py`、`video_transcribe.py`。
+**实际形态**：Next.js App Router 同时提供 React 前端和 Route Handlers；Prisma 管业务 PostgreSQL。TypeScript Agent 位于 Web 服务内。FastAPI RAG 服务提供检索/生成等内部 HTTP 接口；独立 Python Worker 消费 Redis Stream。RAG 向量表由 Python `vector_store.ensure_schema()` 管理，可经 `RAG_PG_DSN` 指向另一 PostgreSQL 数据库。Redis 还保存 24 小时对话历史、短期审批记录与通知 Pub/Sub。文件进 MinIO；附件图片在配置完整时可进腾讯 COS。LLM/Embedding 可使用 OpenAI 兼容端点或 Ollama；解析可用 MinerU 本地/云端，音视频转录依赖 ffmpeg/faster-whisper。依据：`compose.yml`、`lib/agent/llm-registry.ts`、`src/rag_mvp/config.py`、`document_parser.py`、`video_transcribe.py`。
 
 ```mermaid
 flowchart LR
@@ -73,7 +73,7 @@ flowchart LR
     T[review-scheduler] --> N2
 ```
 
-`docker-compose.yml` 还定义 `cloudflared` Tunnel；仓库中有 `grafana/` 和 `loki-config.yaml`，但 Compose 中未定义 Grafana/Loki 服务。`instrumentation-node.ts` 目前只处理 Windows 控制台编码，不能据此推断已接入服务端指标；生产可观测链路无法从当前项目确认。Compose 的 PostgreSQL 服务挂载 `./postgres/init.sql`，仓库中该文件不存在；默认 RAG DSN 指向 `edu_rag`，但未找到创建该数据库的代码或挂载 SQL，因此直接以默认 Compose 启动时，该向量库初始化路径无法确认。
+`compose.yml` 还定义可选的 `cloudflared` Tunnel；仓库中有 `loki-config.yaml`，但 Compose 中未定义 Grafana/Loki 服务。`instrumentation-node.ts` 目前只处理 Windows 控制台编码，不能据此推断已接入服务端指标；生产可观测链路无法从当前项目确认。Compose 通过一次性的 `db-init`、`app-init` 和 `minio-init` 服务创建向量数据库、执行 Prisma migrations、初始化管理员与对象存储 bucket。
 
 ## 4. 核心模块设计
 
@@ -242,7 +242,7 @@ Redis Stream 默认 `edu:rag:tasks:stream`，操作类型见 `lib/queue/ragTask.
 | 语言/前端 | TypeScript、React 19、Next.js 15 App Router；Tailwind CSS、Radix UI、Tiptap、Recharts、Mermaid 等用于页面、编辑和图表。`edu-platform/package.json`、`app/`、`components/`。 |
 | Web 后端 | Next Route Handlers、Prisma 6、Zod/手写校验、Argon2、jose；业务 Service 与 TS ReAct Agent。`lib/services/`、`lib/agent/`。 |
 | Python/RAG | Python 3.11–3.12、FastAPI/Uvicorn、Pydantic、psycopg/asyncpg、pgvector；自实现向量+全文混合检索、Worker、MinerU 文档解析、faster-whisper 转录。`pyproject.toml`、`src/rag_mvp/`、`src/rag_service/`。 |
-| 数据/队列/存储 | PostgreSQL 16 + pgvector；Redis 7 Stream、会话、Pub/Sub；MinIO S3 兼容对象存储，可选腾讯 COS 附件图像。`docker-compose.yml`、`lib/minio.ts`、`lib/cos.ts`。 |
+| 数据/队列/存储 | PostgreSQL 16 + pgvector；Redis 7 Stream、会话、Pub/Sub；MinIO S3 兼容对象存储，可选腾讯 COS 附件图像。`compose.yml`、`lib/minio.ts`、`lib/cos.ts`。 |
 | LLM/Agent | OpenAI SDK 的兼容接口调用多个模型角色；工具注册、ReAct、子任务、技能加载与记忆；Embedding 后端可切 Ollama 或 OpenAI 兼容服务。`lib/agent/llm-registry.ts`、`tools/`、`src/rag_mvp/embedding_factory.py`。 |
 | 基础设施/观测 | Dockerfiles/Compose、可选 Cloudflare Tunnel；Pino/Loguru 日志、可选 Langfuse trace；仓库有 Grafana/Loki 配置，但未见对应 Compose 服务，`instrumentation-node.ts` 也未安装指标采集。实际部署与指标采集范围无法从当前项目确认。 |
 | 测试 | Vitest（`edu-platform/__tests__/`）、pytest（`tests/unit/`、`tests/eval/`），另有 `edu-platform/tests/perf/` 脚本；测试存在不等于线上质量指标。 |
@@ -283,9 +283,10 @@ eduAgent/
     ├── prisma/migrations/            # 业务表迁移
     ├── public/                       # 静态资源
     ├── __tests__/, tests/perf/       # Vitest 与性能脚本
-    ├── scripts/review-scheduler.ts   # 复习调度进程
+    ├── scripts/review-scheduler.mjs  # 复习调度进程
     ├── Dockerfile*                    # Web/RAG 镜像构建
-    └── docker-compose.yml            # 本地/容器编排定义
+compose.yml                            # 生产容器编排定义
+compose.dev.yml                        # 本地调试端口覆盖
 ```
 
 需要继续确认的事项仅列代码无法证明的部分：实际部署拓扑、真实用户数与吞吐、生产 LLM/Embedding 提供方、对象存储数据保留期限、业务目标与效果。任何未来目标或安全修复均应在实施后重新核对本文档。

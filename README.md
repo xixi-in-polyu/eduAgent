@@ -19,16 +19,14 @@ Python RAG 服务组合在一起，支持课程资料处理、基于资料的问
 | --- | --- | --- |
 | Web 应用与 API | Next.js 15、React 19、TypeScript、Prisma | `edu-platform/` |
 | RAG API 与任务 Worker | FastAPI、Python 3.11/3.12、pgvector | `src/rag_service/`、`src/rag_mvp/` |
-| 基础设施 | PostgreSQL、Redis、MinIO、Docker Compose | `edu-platform/docker-compose.yml` |
+| 基础设施 | PostgreSQL、Redis、MinIO、Docker Compose | `compose.yml` |
 | 测试 | Pytest、Vitest | `tests/`、`edu-platform/__tests__/` |
 
 ## 环境要求
 
-- Python 3.11 或 3.12
-- [uv](https://docs.astral.sh/uv/)
-- Node.js 22 和 npm
-- Docker 与 Docker Compose
-- 一个兼容 OpenAI API 的 LLM/Embedding 服务，或本地 Ollama Embedding 服务
+容器部署只需要 Docker Engine 和 Docker Compose v2。源码开发还需要 Python 3.11/3.12、
+[uv](https://docs.astral.sh/uv/)、Node.js 22 和 npm。模型可使用兼容 OpenAI API 的服务，
+Embedding 也可连接宿主机或远程 Ollama。
 
 ## 快速开始
 
@@ -38,63 +36,74 @@ Python RAG 服务组合在一起，支持课程资料处理、基于资料的问
    git clone https://github.com/xixi-in-polyu/eduAgent.git
    cd eduAgent
    cp .env.example .env
-   ln -s ../.env edu-platform/.env
    ```
-
-   如果 `edu-platform/.env` 已存在，可跳过最后一条命令。
 
 2. 修改 `.env`。至少应替换以下占位值：
 
    - `JWT_SECRET`、`INTERNAL_API_KEY`、`RAG_SERVICE_API_KEY`
    - `SEED_ADMIN_PASSWORD`、`LLM_CONFIG_ENCRYPTION_KEY`
+   - `POSTGRES_PASSWORD`、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`
    - `LLM_API_KEY` 及所选模型配置
    - 使用 MinerU Cloud 时的 `MINERU_CLOUD_API_KEY`
 
-3. 安装依赖：
+3. 构建并启动完整容器栈：
 
    ```bash
-   uv sync --locked --dev
-   cd edu-platform
-   npm ci
-   cd ..
+   docker compose up -d --build
    ```
 
-4. 启动 PostgreSQL、Redis 和 MinIO：
+   Compose 会自动完成以下工作：
+
+- 创建业务数据库和独立的 `edu_rag` 向量数据库
+- 安装 pgvector 扩展并执行 Prisma migrations
+- 创建初始管理员和 MinIO bucket
+- 启动 Next.js、RAG API、资料 Worker 与复习调度器
+- 持久化 PostgreSQL、Redis 和 MinIO 数据
+
+4. 查看状态和日志：
 
    ```bash
-   cd edu-platform
-   docker compose up -d postgres redis minio
-   ```
-
-5. 初始化数据库并启动服务（分别在三个终端执行）：
-
-   ```bash
-   # 终端 1：数据库迁移、管理员账号和 Web 应用
-   cd edu-platform
-   npm run db:migrate
-   npm run db:seed
-   npm run dev
-   ```
-
-   ```bash
-   # 终端 2：RAG API
-   uv run rag-service
-   ```
-
-   ```bash
-   # 终端 3：资料处理 Worker
-   uv run edu-rag-worker
+   docker compose ps
+   docker compose logs -f nextjs rag-service rag-worker
    ```
 
 打开 <http://localhost:3000>，使用 `.env` 中的 `SEED_ADMIN_USERNAME` 和
-`SEED_ADMIN_PASSWORD` 登录。RAG API 默认监听 <http://localhost:8001>。
+`SEED_ADMIN_PASSWORD` 登录。默认 Next.js 的 `3000` 和 MinIO API 的 `9000` 端口只绑定
+到宿主机回环地址；数据库、Redis、MinIO Console 和 RAG API 只在 Compose 网络内可见。
 
-也可以在配置好 `.env` 后运行完整容器栈：
+本地调试基础设施时，可额外暴露内部端口：
 
 ```bash
-cd edu-platform
-docker compose up --build
+docker compose -f compose.yml -f compose.dev.yml up -d --build
 ```
+
+## Linux 生产部署
+
+在 Linux 主机安装 Docker Engine 与 Compose v2 后，将仓库和生产 `.env` 放到例如
+`/opt/edu-agent`。生产环境建议用 Nginx/Caddy 将应用域名代理到 `127.0.0.1:3000`，
+并将对象存储域名代理到 `127.0.0.1:9000`。将后者写入
+`MINIO_PUBLIC_ENDPOINT=https://files.example.com`，保证浏览器和外部视觉模型能访问签名 URL：
+
+```bash
+cd /opt/edu-agent
+docker compose pull
+docker compose up -d --no-build
+docker compose ps
+```
+
+若 Ollama 或其他模型服务运行在 Linux 宿主机上，容器内地址应使用
+`http://host.docker.internal:<端口>`，不要使用 `localhost`。
+
+若不在服务器构建镜像，请设置 `GITHUB_OWNER=xixi-in-polyu` 和不可变的
+`IMAGE_TAG=sha-<commit>`，然后从 GHCR 拉取。使用 Cloudflare Tunnel 时运行：
+
+```bash
+docker compose --profile tunnel up -d
+```
+
+升级前备份三个 named volumes；升级使用 `docker compose pull && docker compose up -d`。
+不要使用 `docker compose down -v`，该命令会删除数据库和对象存储数据。更完整的 CI/CD
+配置见 [`.github/DEPLOYMENT.md`](.github/DEPLOYMENT.md)。
 
 ## 开发与验证
 
@@ -127,6 +136,8 @@ tests/unit/         Python 单元测试
 tests/eval/         RAG 和生成效果评估
 tests/perf/         性能测试
 docs/               正式项目文档
+compose.yml         完整生产容器编排
+compose.dev.yml     本地端口覆盖配置
 ```
 
 ## 配置与安全

@@ -17,6 +17,20 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npx prisma generate
 RUN npx next build
 
+# ---- Database initialization image ----
+# Keeps both the full application dependency tree and Prisma CLI out of the lean
+# web runtime image.
+FROM node:22-alpine AS init
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+COPY docker/init/package.json docker/init/package-lock.json ./
+COPY prisma/schema.prisma ./prisma/schema.prisma
+RUN npm ci --omit=dev
+COPY prisma ./prisma/
+RUN npx prisma generate
+USER node
+CMD ["sh", "-c", "npx prisma migrate deploy && node prisma/seed.mjs"]
+
 # ---- Stage 3: Production runtime (minimal image) ----
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -33,18 +47,16 @@ COPY --from=builder /app/public ./public
 
 # Prisma generated client + query engine binary (not auto-traced by standalone output)
 COPY --from=builder /app/node_modules/.prisma          ./node_modules/.prisma
-# Prisma CLI packages needed for `prisma migrate deploy` on startup
-COPY --from=builder /app/node_modules/prisma           ./node_modules/prisma
 COPY --from=builder /app/node_modules/@prisma          ./node_modules/@prisma
-COPY --from=builder /app/prisma                        ./prisma
 
 # argon2 native binary — standalone output does not include native .node files
 COPY --from=builder /app/node_modules/argon2           ./node_modules/argon2
+COPY --from=builder --chown=nextjs:nodejs /app/scripts/review-scheduler.mjs ./scripts/review-scheduler.mjs
 
 USER nextjs
 EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-# Run Prisma schema migrations then start the Next.js standalone server
-CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy && exec node server.js"]
+# Database migration and seed run in the one-shot app-init Compose service.
+CMD ["node", "server.js"]

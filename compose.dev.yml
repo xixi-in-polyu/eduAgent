@@ -1,0 +1,15 @@
+# Optional local-development ports. Production should normally expose only Next.js
+# through a reverse proxy or the Cloudflare Tunnel profile.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+  redis:
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+  minio:
+    ports:
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+  rag-service:
+    ports:
+      - "127.0.0.1:${RAG_SERVICE_PORT:-8001}:8001"

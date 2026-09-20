@@ -83,6 +83,17 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/edu-platform-nextjs:latest
             ghcr.io/${{ github.repository_owner }}/edu-platform-nextjs:sha-${{ github.sha }}
+      - name: Build and push database initializer
+        uses: docker/build-push-action@v7
+        with:
+          context: ./edu-platform
+          target: init
+          push: true
+          cache-from: type=gha,scope=nextjs
+          cache-to: type=gha,mode=max,scope=nextjs
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/edu-platform-init:latest
+            ghcr.io/${{ github.repository_owner }}/edu-platform-init:sha-${{ github.sha }}
       - name: Build and push RAG service
         uses: docker/build-push-action@v7
         with:
@@ -94,6 +105,16 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/edu-rag-service:latest
             ghcr.io/${{ github.repository_owner }}/edu-rag-service:sha-${{ github.sha }}
+      - name: Build and push MinIO
+        uses: docker/build-push-action@v7
+        with:
+          context: ./docker/minio
+          push: true
+          cache-from: type=gha,scope=minio
+          cache-to: type=gha,mode=max,scope=minio
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/edu-minio:latest
+            ghcr.io/${{ github.repository_owner }}/edu-minio:sha-${{ github.sha }}
 
   deploy-production:
     name: Deploy production
@@ -120,7 +141,7 @@ jobs:
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/edu-platform' }}
         run: |
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
-          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" edu-platform/docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/docker-compose.yml"
+          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" compose.yml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/compose.yml"
       - name: Pull and restart services
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -133,4 +154,4 @@ jobs:
           IMAGE_TAG: sha-${{ github.sha }}
         run: |
           printf '%s' "$GHCR_PULL_TOKEN" | ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "docker login ghcr.io -u '$GHCR_USERNAME' --password-stdin"
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd '$DEPLOY_PATH' && test -f .env && GITHUB_OWNER='$IMAGE_OWNER' IMAGE_TAG='$IMAGE_TAG' docker compose --env-file .env pull nextjs rag-service rag-worker review-scheduler && GITHUB_OWNER='$IMAGE_OWNER' IMAGE_TAG='$IMAGE_TAG' docker compose --env-file .env up -d --no-build postgres redis minio rag-service rag-worker nextjs review-scheduler && curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:8001/health && curl --fail --retry 12 --retry-delay 5 http://127.0.0.1:3000/login"
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "cd '$DEPLOY_PATH' && test -f .env && GITHUB_OWNER='$IMAGE_OWNER' IMAGE_TAG='$IMAGE_TAG' docker compose --env-file .env pull && GITHUB_OWNER='$IMAGE_OWNER' IMAGE_TAG='$IMAGE_TAG' docker compose --env-file .env up -d --no-build --wait && docker compose exec -T rag-service python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)\" && curl --fail http://127.0.0.1:3000/login"

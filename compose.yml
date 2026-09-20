@@ -1,0 +1,277 @@
+name: edu-agent
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-platform-database: &platform-database
+  DATABASE_URL: ${CONTAINER_DATABASE_URL:-postgresql://${POSTGRES_USER:-edu}:${POSTGRES_PASSWORD:-edu}@postgres:5432/${POSTGRES_DB:-edu_platform}?schema=public}
+
+x-rag-database: &rag-database
+  RAG_PG_DSN: ${CONTAINER_RAG_PG_DSN:-postgresql://${POSTGRES_USER:-edu}:${POSTGRES_PASSWORD:-edu}@postgres:5432/${RAG_POSTGRES_DB:-edu_rag}}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-edu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edu}
+      POSTGRES_DB: ${POSTGRES_DB:-edu_platform}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  db-init:
+    image: pgvector/pgvector:pg16
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-edu}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-edu}
+      POSTGRES_DB: ${POSTGRES_DB:-edu_platform}
+      RAG_POSTGRES_DB: ${RAG_POSTGRES_DB:-edu_rag}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        platform_db=$${POSTGRES_DB:-edu_platform}
+        rag_db=$${RAG_POSTGRES_DB:-edu_rag}
+        case "$${rag_db}" in
+          *[!A-Za-z0-9_-]* | "") echo "Invalid RAG_POSTGRES_DB" >&2; exit 1 ;;
+        esac
+        if ! psql --dbname "$${platform_db}" --list --tuples-only \
+          | cut -d '|' -f 1 | tr -d ' ' | grep -Fqx "$${rag_db}"; then
+          createdb --owner "$${PGUSER}" "$${rag_db}"
+        fi
+        psql --dbname "$${rag_db}" --set ON_ERROR_STOP=1 \
+          --command 'CREATE EXTENSION IF NOT EXISTS vector'
+        echo "RAG database is ready: $${rag_db}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+
+  minio:
+    image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-minio:${IMAGE_TAG:-latest}
+    build:
+      context: ./docker/minio
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minio_minio_minio}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+    logging: *default-logging
+
+  minio-init:
+    image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-rag-service:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: edu-platform/Dockerfile.rag-service
+    restart: "no"
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minio_minio_minio}
+      MINIO_BUCKET: ${MINIO_BUCKET:-edu-materials}
+      MINIO_USE_SSL: "false"
+    command: ["edu-storage-init"]
+    depends_on:
+      minio:
+        condition: service_started
+    logging: *default-logging
+
+  app-init:
+    image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-platform-init:${IMAGE_TAG:-latest}
+    build:
+      context: ./edu-platform
+      dockerfile: Dockerfile
+      target: init
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      <<: *platform-database
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD must be set}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        npx prisma migrate deploy
+        node prisma/seed.mjs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
+
+  rag-service:
+    image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-rag-service:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: edu-platform/Dockerfile.rag-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      <<: [*platform-database, *rag-database]
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: http://minio:9000
+      NEXTJS_INTERNAL_URL: http://nextjs:3000
+      RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY:?RAG_SERVICE_API_KEY must be set}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}
+    volumes:
+      - model_cache:/home/appuser/.cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  rag-worker:
+    image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-rag-service:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: edu-platform/Dockerfile.rag-service
+    restart: unless-stopped
+    command: ["edu-rag-worker"]
+    env_file:
+      - .env
+    environment:
+      <<: [*platform-database, *rag-database]
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: http://minio:9000
+      NEXTJS_INTERNAL_URL: http://nextjs:3000
+      RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY:?RAG_SERVICE_API_KEY must be set}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}
+    volumes:
+      - model_cache:/home/appuser/.cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      app-init:
+        condition: service_completed_successfully
+      db-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    stop_grace_period: 45s
+    logging: *default-logging
+
+  nextjs:
+    image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-platform-nextjs:${IMAGE_TAG:-latest}
+    build:
+      context: ./edu-platform
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      <<: *platform-database
+      REDIS_URL: redis://redis:6379
+      RAG_SERVICE_URL: http://rag-service:8001
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_USE_SSL: "false"
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}
+      RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY:?RAG_SERVICE_API_KEY must be set}
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    depends_on:
+      app-init:
+        condition: service_completed_successfully
+      rag-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  review-scheduler:
+    image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-platform-nextjs:${IMAGE_TAG:-latest}
+    build:
+      context: ./edu-platform
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "scripts/review-scheduler.mjs"]
+    env_file:
+      - .env
+    environment:
+      NEXTJS_INTERNAL_URL: http://nextjs:3000
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}
+    depends_on:
+      nextjs:
+        condition: service_healthy
+    logging: *default-logging
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      nextjs:
+        condition: service_healthy
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  model_cache:

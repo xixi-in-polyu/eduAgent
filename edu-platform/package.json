@@ -12,9 +12,9 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
-    "db:seed": "prisma db seed",
+    "db:seed": "node prisma/seed.mjs",
     "skill:install": "node scripts/install-skill.mjs",
-    "review:scheduler": "tsx scripts/review-scheduler.ts",
+    "review:scheduler": "node scripts/review-scheduler.mjs",
     "perf:report": "node tests/perf/summarize-results.mjs"
   },
   "dependencies": {
@@ -88,8 +88,5 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
-  },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
   }
 }

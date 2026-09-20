@@ -1,0 +1,9 @@
+{
+  "name": "edu-platform-init",
+  "private": true,
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "argon2": "0.41.1",
+    "prisma": "6.19.3"
+  }
+}

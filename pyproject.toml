@@ -54,6 +54,7 @@ parse = "rag_mvp.cli:parse"
 mindmap = "rag_mvp.mindmap_cli:cli"
 edu-rag-worker = "rag_mvp.worker:main"
 rag-service = "rag_service.main:run"
+edu-storage-init = "rag_mvp.storage_init:main"
 
 [build-system]
 requires = ["hatchling"]

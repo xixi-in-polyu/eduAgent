@@ -18,13 +18,14 @@ import { getMinioConfig } from "@/lib/config";
 const MAX_SINGLE_PUT_BYTES = 16 * 1024 * 1024;
 const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 
-function buildClient(): S3Client {
+function buildClient(endpointOverride?: string): S3Client {
   const c = getMinioConfig();
-  const endpointUrl = c.endpoint.startsWith("http")
-    ? c.endpoint
+  const endpoint = endpointOverride?.trim() || c.endpoint;
+  const endpointUrl = endpoint.startsWith("http")
+    ? endpoint
     : c.useSsl
-      ? `https://${c.endpoint}`
-      : `http://${c.endpoint}`;
+      ? `https://${endpoint}`
+      : `http://${endpoint}`;
   return new S3Client({
     region: c.region,
     endpoint: endpointUrl,
@@ -42,10 +43,18 @@ function buildClient(): S3Client {
 }
 
 let _client: S3Client | null = null;
+let _presignClient: S3Client | null = null;
 
 export function getS3Client(): S3Client {
   if (!_client) _client = buildClient();
   return _client;
+}
+
+function getS3PresignClient(): S3Client {
+  const publicEndpoint = process.env.MINIO_PUBLIC_ENDPOINT?.trim();
+  if (!publicEndpoint) return getS3Client();
+  if (!_presignClient) _presignClient = buildClient(publicEndpoint);
+  return _presignClient;
 }
 
 export async function putObjectStream(params: {
@@ -238,7 +247,7 @@ export async function getMinioPresignedUrl(
 ): Promise<string> {
   const c = getMinioConfig();
   return getSignedUrl(
-    getS3Client(),
+    getS3PresignClient(),
     new GetObjectCommand({ Bucket: c.bucket, Key: objectKey }),
     { expiresIn },
   );

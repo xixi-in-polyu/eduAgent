@@ -1,9 +1,8 @@
 import type { NextRequest } from "next/server";
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { requireAuthenticated } from "@/lib/admin";
 import { getAuthFromRequest } from "@/lib/request-auth";
-import { getS3Client } from "@/lib/minio";
+import { getMinioPresignedUrl, getS3Client } from "@/lib/minio";
 import { getMinioConfig, isCosEnabled } from "@/lib/config";
 import { getCosPresignedUrl, putCosObject } from "@/lib/cos";
 import { ApiError } from "@/lib/http/api-error";
@@ -110,10 +109,9 @@ export async function POST(req: NextRequest) {
       }),
     );
 
-    const presignedUrl = await getSignedUrl(
-      client,
-      new GetObjectCommand({ Bucket: c.bucket, Key: objectKey }),
-      { expiresIn: PRESIGN_TTL_SECONDS },
+    const presignedUrl = await getMinioPresignedUrl(
+      objectKey,
+      PRESIGN_TTL_SECONDS,
     );
 
     return jsonOk({
