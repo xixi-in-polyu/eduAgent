@@ -1,4 +1,4 @@
-"""使用 qwen-long-latest 筛选低质量题目（图注查找类、非问句类等）。
+"""使用配置的评测模型筛选低质量题目（图注查找类、非问句类等）。
 
 用法：
   python -m tests.eval.filter_bad_questions
@@ -131,6 +131,9 @@ async def _judge_batch_async(
     user_msg = JUDGE_USER_TEMPLATE.format(n=len(batch), items=items_text)
 
     async with semaphore:
+        request_kwargs: dict = {}
+        if model.lower().startswith("deepseek"):
+            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         resp = await client.chat.completions.create(
             model=model,
             messages=[
@@ -139,6 +142,7 @@ async def _judge_batch_async(
             ],
             temperature=0.0,
             max_tokens=2048,
+            **request_kwargs,
         )
     text = resp.choices[0].message.content or ""
     return _parse_response(text, batch)
@@ -176,31 +180,39 @@ def main() -> None:
     parser.add_argument("--questions", default=str(QUESTIONS_FILE))
     parser.add_argument("--output", default=str(BAD_IDS_FILE))
     parser.add_argument("--detail", default=str(DETAIL_FILE))
-    parser.add_argument("--model", default="qwen-long-latest")
+    parser.add_argument("--model", default=None)
     args = parser.parse_args()
 
     # 读取配置
     try:
         from rag_mvp.config import settings  # type: ignore[import-untyped]
-        api_key = settings.llm_api_key
-        base_url = settings.llm_base_url
+        api_key = settings.effective_chat_api_key
+        base_url = settings.effective_chat_base_url
+        configured_model = settings.effective_chat_model
     except Exception as e:
         print(f"无法加载 settings: {e}，尝试直接读取环境变量", file=sys.stderr)
         api_key = os.environ.get("LLM_API_KEY", "")
-        base_url = os.environ.get("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        base_url = os.environ.get("LLM_CHAT_BASE_URL") or os.environ.get(
+            "LLM_BASE_URL", "https://api.deepseek.com"
+        )
+        configured_model = os.environ.get("LLM_CHAT_MODEL") or os.environ.get(
+            "LLM_MODEL", "deepseek-flash"
+        )
+
+    model = args.model or configured_model
 
     if not api_key:
         print("ERROR: 未找到 LLM_API_KEY / llm_api_key，请检查 .env 或环境变量", file=sys.stderr)
         sys.exit(1)
 
-    print(f"使用模型 : {args.model}")
+    print(f"使用模型 : {model}")
     print(f"Base URL : {base_url}")
     print(f"题目文件 : {args.questions}")
 
     questions = json.loads(Path(args.questions).read_text(encoding="utf-8"))
     print(f"题目总数 : {len(questions)}")
 
-    results = asyncio.run(_run_all(questions, api_key, base_url, args.model))
+    results = asyncio.run(_run_all(questions, api_key, base_url, model))
 
     # 排序结果
     results.sort(key=lambda r: int(r["id"]) if str(r["id"]).isdigit() else 0)

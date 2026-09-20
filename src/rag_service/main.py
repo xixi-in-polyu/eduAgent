@@ -19,8 +19,10 @@ import os
 import subprocess
 import tempfile
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -53,10 +55,28 @@ def _require_key(request: Request) -> None:
 
 
 # ---------------------------------------------------------------------------
-# App
+# App lifecycle
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="RAG Service", version="1.0.0", docs_url="/docs")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    from rag_mvp.vector_store import ensure_schema
+
+    # Schema creation and index checks belong to startup, not the query hot path.
+    await asyncio.to_thread(ensure_schema)
+    try:
+        yield
+    finally:
+        from rag_mvp.db import close_connection_pool
+        from rag_mvp.embedding_factory import close_embedding_clients
+        from rag_mvp.vector_store import close_vector_pool
+
+        await close_embedding_clients()
+        await asyncio.to_thread(close_connection_pool)
+        await asyncio.to_thread(close_vector_pool)
+
+
+app = FastAPI(title="RAG Service", version="1.0.0", docs_url="/docs", lifespan=_lifespan)
 
 # ---------------------------------------------------------------------------
 # /rag/query
@@ -85,24 +105,54 @@ class HitItem(BaseModel):
 class QueryResponse(BaseModel):
     hits: list[HitItem]
     warnings: list[str] = Field(default_factory=list)
+    timings_ms: dict[str, float] = Field(default_factory=dict)
 
 
-def _fetch_chunk_page_mappings(chunk_ids: list[str]) -> dict[str, int]:
-    """Fetch chunk_id → page_idx from chunk_page_mappings table."""
-    if not chunk_ids:
-        return {}
+def _fetch_hit_enrichment(
+    material_ids: list[str], chunk_ids: list[str]
+) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]], dict[str, int]]:
+    """Fetch hit metadata with one pool checkout to reduce high-concurrency contention."""
+    from rag_mvp.db import pooled_connection
+
+    titles: dict[str, str] = {}
+    images: dict[str, list[dict[str, Any]]] = {}
+    page_mappings: dict[str, int] = {}
     try:
-        from rag_mvp.db import connect_sync
+        with pooled_connection() as conn, conn.cursor() as cur:
+            if material_ids:
+                cur.execute(
+                    """
+                    SELECT id::text, original_filename
+                    FROM materials
+                    WHERE id = ANY(%s::uuid[]) AND NOT is_deleted
+                    """,
+                    (material_ids,),
+                )
+                titles = {row[0]: row[1] for row in cur.fetchall()}
 
-        with connect_sync() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT chunk_id, page_idx FROM chunk_page_mappings WHERE chunk_id = ANY(%s)",
-                (chunk_ids,),
-            )
-            return {row[0]: row[1] for row in cur.fetchall()}
+                cur.execute(
+                    """
+                    SELECT material_id::text, page_idx, minio_url
+                    FROM material_images
+                    WHERE material_id = ANY(%s::uuid[])
+                    ORDER BY material_id, page_idx
+                    """,
+                    (material_ids,),
+                )
+                for mid, page_idx, minio_url in cur.fetchall():
+                    images.setdefault(mid, []).append(
+                        {"page_idx": page_idx, "url": minio_url}
+                    )
+
+            if chunk_ids:
+                cur.execute(
+                    "SELECT chunk_id, page_idx FROM chunk_page_mappings WHERE chunk_id = ANY(%s)",
+                    (chunk_ids,),
+                )
+                page_mappings = {row[0]: row[1] for row in cur.fetchall()}
     except Exception as exc:  # noqa: BLE001
-        logger.warning("chunk_page_mappings lookup failed: {}", exc)
-        return {}
+        logger.warning("hit enrichment lookup failed: {}", exc)
+    return titles, images, page_mappings
 
 
 def _enrich_hits(
@@ -140,56 +190,9 @@ def _enrich_hits(
     return items
 
 
-def _fetch_material_titles(material_ids: list[str]) -> dict[str, str]:
-    """Fetch material filename/title from PostgreSQL for a list of material IDs."""
-    if not material_ids:
-        return {}
-    try:
-        from rag_mvp.db import connect_sync
-
-        with connect_sync() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                    SELECT id::text, original_filename
-                    FROM materials
-                    WHERE id = ANY(%s::uuid[]) AND NOT is_deleted
-                    """,
-                (material_ids,),
-            )
-            return {row[0]: row[1] for row in cur.fetchall()}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("material_titles lookup failed: {}", exc)
-        return {}
-
-
-def _fetch_material_images(material_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
-    """Fetch image records from material_images table, keyed by material_id."""
-    if not material_ids:
-        return {}
-    try:
-        from rag_mvp.db import connect_sync
-
-        with connect_sync() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                    SELECT material_id::text, page_idx, minio_url
-                    FROM material_images
-                    WHERE material_id = ANY(%s::uuid[])
-                    ORDER BY material_id, page_idx
-                    """,
-                (material_ids,),
-            )
-            result: dict[str, list[dict[str, Any]]] = {}
-            for mid, page_idx, minio_url in cur.fetchall():
-                result.setdefault(mid, []).append({"page_idx": page_idx, "url": minio_url})
-            return result
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("material_images lookup failed: {}", exc)
-        return {}
-
-
 @app.post("/rag/query", response_model=QueryResponse)
 async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> QueryResponse:
+    request_started = perf_counter()
     from rag_mvp.engine import (
         course_retrieval_hits,
         personal_retrieval_hits,
@@ -199,6 +202,7 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
     top_k = body.top_k
     question = body.question.strip()
     warnings: list[str] = []
+    retrieval_timings: dict[str, float] = {}
 
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty")
@@ -226,7 +230,10 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
         if not body.course_id:
             raise HTTPException(status_code=400, detail="course_id required for source=course")
         raw_hits = await course_retrieval_hits(
-            body.course_id, question, top_k=top_k
+            body.course_id,
+            question,
+            top_k=top_k,
+            timings_ms=retrieval_timings,
         )
 
     elif source == "all":
@@ -266,6 +273,8 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
             detail=f"Invalid source={source!r}. Allowed: personal, course, all, enrolled_courses",
         )
 
+    retrieval_finished = perf_counter()
+
     # Collect material IDs for title and image lookup
     material_ids = list(
         {
@@ -275,9 +284,18 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
         }
     )
     chunk_ids = [str(h.get("chunk_id") or "") for h in raw_hits if h.get("chunk_id")]
-    material_titles = _fetch_material_titles(material_ids)
-    material_images = _fetch_material_images(material_ids)
-    chunk_page_mappings = _fetch_chunk_page_mappings(chunk_ids)
+    material_titles, material_images, chunk_page_mappings = await asyncio.to_thread(
+        _fetch_hit_enrichment,
+        material_ids,
+        chunk_ids,
+    )
+    enrichment_finished = perf_counter()
+    timings_ms = {
+        **retrieval_timings,
+        "retrieval": (retrieval_finished - request_started) * 1000,
+        "enrichment": (enrichment_finished - retrieval_finished) * 1000,
+        "total": (enrichment_finished - request_started) * 1000,
+    }
 
     # For enrolled_courses, use per-hit _course_id; otherwise use body.course_id
     if source == "enrolled_courses":
@@ -305,7 +323,7 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
                     image_urls=image_urls,
                 )
             )
-        return QueryResponse(hits=items, warnings=warnings)
+        return QueryResponse(hits=items, warnings=warnings, timings_ms=timings_ms)
 
     course_id_for_hits = body.course_id if source in ("course", "all") else None
     hits = _enrich_hits(
@@ -315,7 +333,7 @@ async def rag_query(body: QueryRequest, _auth: None = Depends(_require_key)) -> 
         material_images=material_images,
         chunk_page_mappings=chunk_page_mappings,
     )
-    return QueryResponse(hits=hits, warnings=warnings)
+    return QueryResponse(hits=hits, warnings=warnings, timings_ms=timings_ms)
 
 
 # ---------------------------------------------------------------------------

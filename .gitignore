@@ -57,6 +57,7 @@ temp/
 *.tmp
 *.swp
 *.swo
+build_errors.txt
 
 # Local databases and application state
 sessions.db
@@ -69,6 +70,9 @@ rag_storage/
 output/
 data/
 docs/
+!docs/
+docs/*
+!docs/project-documentation.md
 datasets/
 models/
 faster-whisper-base/
@@ -80,10 +84,18 @@ skills/pptx/scripts/
 edu-platform/postgres/
 scripts/truncate_except_prisma.sql
 test.py
+test_users.py
+test_assignments.py
+
+# Local authoring notes and agent instructions
+AGENTS.md
+thesis.md
+system-evaluation-and-observability.md
 
 # IDE and editor state
 .idea/
 .cursor/
+.vscode/
 *.code-workspace
 
 # Operating system metadata

@@ -45,14 +45,42 @@ type HitItem = {
   image_urls?: Array<{ page_idx: number; url: string }>;
 };
 
-function _formatHitsForLlm(hits: HitItem[]): string {
-  if (hits.length === 0) return "（未找到相关内容）";
-  return hits
-    .map((h, i) => {
-      const src = h.material_title ?? h.course_id ?? h.origin;
-      return `[${i + 1}] 来源：${src}\n${h.text}`;
-    })
-    .join("\n\n---\n\n");
+function _boundedEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
+function _formatHitsForLlm(hits: HitItem[]): {
+  content: string;
+  contextChars: number;
+  truncated: boolean;
+} {
+  if (hits.length === 0) {
+    return { content: "（未找到相关内容）", contextChars: 0, truncated: false };
+  }
+  const totalLimit = _boundedEnvInt("RAG_CONTEXT_MAX_CHARS", 6000, 500, 50000);
+  const perHitLimit = _boundedEnvInt("RAG_CONTEXT_MAX_CHARS_PER_HIT", 2000, 200, 20000);
+  let remaining = totalLimit;
+  let contextChars = 0;
+  let truncated = false;
+  const sections: string[] = [];
+  for (const [index, hit] of hits.entries()) {
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const limit = Math.min(perHitLimit, remaining);
+    const text = hit.text.slice(0, limit);
+    const wasTruncated = text.length < hit.text.length;
+    const src = hit.material_title ?? hit.course_id ?? hit.origin;
+    sections.push(
+      `[${index + 1}] 来源：${src}\n${text}${wasTruncated ? "\n（片段已截断）" : ""}`,
+    );
+    contextChars += text.length;
+    remaining -= text.length;
+    truncated ||= wasTruncated;
+  }
+  return { content: sections.join("\n\n---\n\n"), contextChars, truncated };
 }
 
 function _hitsToB3Citations(hits: HitItem[]): ToolResult["citations"] {
@@ -84,38 +112,6 @@ function _mergeHits(hitArrays: HitItem[][]): HitItem[] {
   return Array.from(map.values()).sort(
     (a, b) => (b.relevance_score ?? 0) - (a.relevance_score ?? 0),
   );
-}
-
-/** Ask a sub-agent (title model, no tools) whether the query needs decomposition. */
-async function _decomposeQuery(
-  question: string,
-  ctx: TurnContext,
-): Promise<{ decompose: boolean; sub_queries: string[] }> {
-  const client = getLLMClient("title");
-  const { model } = getRoleConfig("title");
-  const task =
-    `你是查询分析器。判断以下查询是否包含多个独立子问题（如比较不同概念、多方面权衡），需分别检索才能完整回答。\n\n` +
-    `查询：${question}\n\n` +
-    `仅输出 JSON，格式：{"decompose": boolean, "sub_queries": ["子问题1", "子问题2"], "reason": "理由"}\n` +
-    `sub_queries 上限 3 个；decompose=false 时 sub_queries 为空数组。`;
-  try {
-    const result = await runSubAgent(client, model, { task, allowedTools: [], ctx, temperature: ctx?.evalMode ? 0 : undefined }, 0);
-    if (!result.success) return { decompose: false, sub_queries: [] };
-    const jsonMatch = result.summary.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { decompose: false, sub_queries: [] };
-    const parsed = JSON.parse(jsonMatch[0]) as { decompose?: boolean; sub_queries?: unknown[] };
-    if (!parsed.decompose || !Array.isArray(parsed.sub_queries)) {
-      return { decompose: false, sub_queries: [] };
-    }
-    const sub_queries = (parsed.sub_queries as unknown[])
-      .filter((q): q is string => typeof q === "string" && q.trim().length > 0)
-      .slice(0, 3);
-    return sub_queries.length >= 2
-      ? { decompose: true, sub_queries }
-      : { decompose: false, sub_queries: [] };
-  } catch {
-    return { decompose: false, sub_queries: [] };
-  }
 }
 
 /** Ask sub-agent (title model, no tools) to rewrite a low-confidence query. */
@@ -162,7 +158,9 @@ export const knowledgeQueryTool: Tool = {
   name: "knowledge_query",
   description:
     "从知识库中检索信息，回答关于已导入文档/课程资料（如 PPT、PDF、讲义）的任何问题。" +
-    "在回答概念、原理、定义、事实类问题时应优先调用此工具。",
+    "在回答概念、原理、定义、事实类问题时应优先调用此工具。" +
+    "你必须在本次工具调用中自行判断是否需要拆分：简单问题不要传 sub_queries；" +
+    "只有包含多个独立检索意图时，才传入 2–3 个子查询。",
   parameters: {
     type: "object",
     properties: {
@@ -181,7 +179,16 @@ export const knowledgeQueryTool: Tool = {
           },
         ],
       },
-      top_k: { type: "integer", minimum: 1, maximum: 20, description: "返回最大片段数（默认 5，范围 1–20）" },
+      top_k: { type: "integer", minimum: 1, maximum: 20, description: "返回最大片段数（默认 3，范围 1–20）" },
+      sub_queries: {
+        type: "array",
+        items: { type: "string", minLength: 1, maxLength: 500 },
+        minItems: 2,
+        maxItems: 3,
+        uniqueItems: true,
+        description:
+          "可选。仅当问题包含多个独立检索意图时，由你在本次工具调用中直接给出 2–3 个完整、可独立检索的子查询；简单问题必须省略。",
+      },
     },
     required: ["question", "sources"],
   },
@@ -225,7 +232,7 @@ export const knowledgeQueryTool: Tool = {
     // In eval mode, always restrict retrieval to course KB regardless of what the LLM requested.
     const effectiveSource = ctx.evalMode ? "course" : source!;
 
-    const top_k = typeof args.top_k === "number" ? Math.max(1, Math.min(20, args.top_k)) : 5;
+    const top_k = typeof args.top_k === "number" ? Math.max(1, Math.min(20, args.top_k)) : 3;
     type QueryResp = { hits: HitItem[]; warnings: string[] };
     const baseBody = {
       source: effectiveSource,
@@ -235,18 +242,25 @@ export const knowledgeQueryTool: Tool = {
       top_k,
     };
 
-    // ---- Phase 4: LLM-driven query decomposition -------------------------
-    await ctx.onProgress?.("正在分析查询…");
-    const decomposition = await _decomposeQuery(question, ctx);
+    // The main agent decides whether decomposition is needed while producing
+    // this tool call. Avoid a second, unconditional LLM round-trip here.
+    const requestedSubQueries = Array.isArray(args.sub_queries)
+      ? args.sub_queries
+          .filter((q): q is string => typeof q === "string")
+          .map((q) => q.trim())
+          .filter((q) => q.length > 0 && q.length <= 500)
+      : [];
+    const subQueries = [...new Set(requestedSubQueries)].slice(0, 3);
+    const decomposed = subQueries.length >= 2;
     let hits: HitItem[];
-    if (decomposition.decompose) {
-      await ctx.onProgress?.(`正在分解为 ${decomposition.sub_queries.length} 个子查询并检索…`);
+    if (decomposed) {
+      await ctx.onProgress?.(`正在分解为 ${subQueries.length} 个子查询并检索…`);
       const results = await Promise.all(
-        decomposition.sub_queries.map((q) =>
+        subQueries.map((q) =>
           ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, { ...baseBody, question: q }),
         ),
       );
-      hits = _mergeHits(results.map((r) => r.hits));
+      hits = _mergeHits(results.map((r) => r.hits)).slice(0, top_k);
     } else {
       await ctx.onProgress?.("正在检索知识库…");
       const resp = await ragPost<QueryResp>(`${ragUrl}/rag/query`, ragKey, {
@@ -287,21 +301,23 @@ export const knowledgeQueryTool: Tool = {
     }
 
     // ---- Format result ---------------------------------------------------
-    let content = _formatHitsForLlm(hits);
+    const formatted = _formatHitsForLlm(hits);
+    let content = formatted.content;
     if (rewritten) content += "\n\n（已自动改写查询）";
     if (lowConfidence) content += "\n\n[置信度: 低]";
 
     const citations = _hitsToB3Citations(hits);
     log.debug({ hitCount: hits.length, lowConfidence, rewritten, durationMs: Date.now() - t0 }, "knowledge_query done");
     const meta: Record<string, unknown> = {
-      decomposed: decomposition.decompose,
-      ...(decomposition.decompose ? { sub_queries: decomposition.sub_queries } : {}),
+      decomposed,
+      ...(decomposed ? { sub_queries: subQueries } : {}),
       rewritten,
       ...(rewritten && rewrittenQuery ? { rewritten_query: rewrittenQuery } : {}),
       hit_count: hits.length,
+      context_chars: formatted.contextChars,
+      context_truncated: formatted.truncated,
       max_score: hits.length > 0 ? Math.max(...hits.map((h) => h.relevance_score ?? 0)) : 0,
     };
     return { content, citations, meta };
   },
 };
-

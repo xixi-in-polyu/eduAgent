@@ -2,9 +2,9 @@
  * LLM Registry — role-based LLM client factory.
  *
  * Roles:
- *   chat    — main conversation & assignment generation (e.g. deepseek-v4-pro)
+ *   chat    — main conversation & assignment generation (e.g. deepseek-flash)
  *   vision  — image understanding (e.g. qwen3.6-plus)
- *   title   — chat title generation, cheap/fast (e.g. deepseek-v4-flash)
+ *   title   — chat title generation, cheap/fast (e.g. deepseek-flash)
  *   memory  — memory extraction, auxiliary (e.g. qwen-plus / gpt-4o-mini)
  *
  * Fallback chains (first non-empty value wins):
@@ -90,13 +90,13 @@ export function getRoleConfig(role: LLMRole): RoleConfig {
         model: e("LLM_AUXILIARY_MODEL") ?? e("LLM_MODEL") ?? "gpt-4o-mini",
       };
 
-    // completion role — FIM endpoint (deepseek-v4-flash via beta URL by default)
+    // completion role — FIM endpoint (deepseek-flash via beta URL by default)
     // Env: LLM_COMPLETION_API_KEY, LLM_COMPLETION_BASE_URL, LLM_COMPLETION_MODEL
     case "completion":
       return {
         apiKey: e("LLM_COMPLETION_API_KEY") ?? defaultKey,
         baseURL: e("LLM_COMPLETION_BASE_URL") ?? "https://api.deepseek.com/beta",
-        model: e("LLM_COMPLETION_MODEL") ?? "deepseek-v4-flash",
+        model: e("LLM_COMPLETION_MODEL") ?? "deepseek-flash",
       };
   }
 }

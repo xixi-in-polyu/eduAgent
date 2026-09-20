@@ -54,7 +54,7 @@ def _e(name: str, fallback: str = "") -> str:
 # 复现 llm-registry.ts 里 "chat" role 的 fallback 逻辑
 API_KEY  = _e("LLM_CHAT_API_KEY") or _e("LLM_API_KEY")
 BASE_URL = _e("LLM_CHAT_BASE_URL") or _e("LLM_BASE_URL") or None
-MODEL    = _e("LLM_CHAT_MODEL") or _e("LLM_MODEL") or "gpt-4o"
+MODEL    = _e("LLM_CHAT_MODEL") or _e("LLM_MODEL") or "deepseek-flash"
 
 print(f"[llm]  base_url={BASE_URL or '(openai default)'}")
 print(f"[llm]  model={MODEL}")

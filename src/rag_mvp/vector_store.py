@@ -9,17 +9,26 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-import psycopg
 from loguru import logger
+from psycopg_pool import ConnectionPool
 
 from .config import settings
 from .embedding_factory import embed_texts
+
+
+_pool_lock = threading.Lock()
+_pool: ConnectionPool | None = None
+_pool_dsn: str | None = None
+_schema_lock = threading.Lock()
+_schema_ready_dsn: str | None = None
 
 
 @dataclass(slots=True)
@@ -61,8 +70,6 @@ def personal_workspace(user_id: str) -> str:
 
 
 def _dsn() -> str:
-    import os
-
     dsn = os.environ.get("RAG_PG_DSN", "").strip() or os.environ.get("DATABASE_URL", "").strip()
     if not dsn:
         raise RuntimeError("RAG_PG_DSN or DATABASE_URL is required for vector RAG storage")
@@ -71,15 +78,61 @@ def _dsn() -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
+def _connection_pool() -> ConnectionPool:
+    global _pool, _pool_dsn
+    dsn = _dsn()
+    if _pool is not None and _pool_dsn == dsn:
+        return _pool
+    with _pool_lock:
+        if _pool is not None and _pool_dsn == dsn:
+            return _pool
+        if _pool is not None:
+            _pool.close()
+        min_size = max(1, int(os.environ.get("RAG_PG_POOL_MIN_SIZE", "1")))
+        max_size = max(min_size, int(os.environ.get("RAG_PG_POOL_MAX_SIZE", "20")))
+        _pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=min_size,
+            max_size=max_size,
+            timeout=float(os.environ.get("RAG_PG_POOL_TIMEOUT", "10")),
+            open=True,
+        )
+        _pool_dsn = dsn
+        return _pool
+
+
+def close_vector_pool() -> None:
+    """Close the process-wide pgvector pool during service shutdown."""
+    global _pool, _pool_dsn, _schema_ready_dsn
+    with _pool_lock:
+        if _pool is not None:
+            _pool.close()
+        _pool = None
+        _pool_dsn = None
+        _schema_ready_dsn = None
+
+
 def _vector_literal(values: Sequence[float]) -> str:
     return "[" + ",".join(format(float(value), ".9g") for value in values) + "]"
 
 
 def ensure_schema() -> None:
+    global _schema_ready_dsn
+    dsn = _dsn()
+    if _schema_ready_dsn == dsn:
+        return
+    with _schema_lock:
+        if _schema_ready_dsn == dsn:
+            return
+        _ensure_schema_once(dsn)
+        _schema_ready_dsn = dsn
+
+
+def _ensure_schema_once(_expected_dsn: str) -> None:
     dim = int(settings.embedding_dim)
     if dim <= 0:
         raise RuntimeError("EMBEDDING_DIM must be positive")
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+    with _connection_pool().connection() as conn, conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
         cur.execute(
             """
@@ -180,7 +233,7 @@ async def replace_document(
 
     def _write() -> int:
         ensure_schema()
-        with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        with _connection_pool().connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO rag_documents (workspace, id, file_path, status, chunks_count, metadata)
@@ -241,7 +294,7 @@ async def replace_document(
 async def delete_document(workspace: str, doc_id: str) -> None:
     def _delete() -> None:
         ensure_schema()
-        with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        with _connection_pool().connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM rag_documents WHERE workspace = %s AND id = %s", (workspace, doc_id))
             conn.commit()
 
@@ -251,22 +304,33 @@ async def delete_document(workspace: str, doc_id: str) -> None:
 async def clear_workspace(workspace: str) -> None:
     def _clear() -> None:
         ensure_schema()
-        with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        with _connection_pool().connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM rag_documents WHERE workspace = %s", (workspace,))
             conn.commit()
 
     await asyncio.to_thread(_clear)
 
 
-async def vector_search(workspace: str, query: str, *, top_k: int) -> list[dict[str, Any]]:
+async def vector_search(
+    workspace: str,
+    query: str,
+    *,
+    top_k: int,
+    timings_ms: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     vectors = await embed_texts([query])
+    embedding_finished = loop.time()
+    if timings_ms is not None:
+        timings_ms["embedding"] = (embedding_finished - started) * 1000
     if not vectors:
         return []
     vector = _vector_literal(vectors[0])
 
     def _search() -> list[dict[str, Any]]:
         ensure_schema()
-        with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        with _connection_pool().connection() as conn, conn.cursor() as cur:
             sql = """
                 SELECT id, content, file_path, document_id, page_idx, metadata,
                        1 - (embedding <=> %s::vector) AS score
@@ -301,12 +365,15 @@ async def vector_search(workspace: str, query: str, *, top_k: int) -> list[dict[
                 for row in rows
             ]
 
-    return await asyncio.to_thread(_search)
+    result = await asyncio.to_thread(_search)
+    if timings_ms is not None:
+        timings_ms["vector_db"] = (loop.time() - embedding_finished) * 1000
+    return result
 
 
 def bm25_search(workspace: str, query: str, *, top_k: int) -> list[dict[str, Any]]:
     ensure_schema()
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+    with _connection_pool().connection() as conn, conn.cursor() as cur:
         if re.search(r"[\u4e00-\u9fff]", query):
             terms = _cjk_bigrams(query)
             if not terms:
@@ -368,7 +435,7 @@ def _cjk_bigrams(query: str) -> list[str]:
 
 def document_page_mappings(workspace: str, doc_id: str) -> list[tuple[str, int]]:
     ensure_schema()
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+    with _connection_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
             SELECT id, page_idx FROM rag_chunks
@@ -381,7 +448,7 @@ def document_page_mappings(workspace: str, doc_id: str) -> list[tuple[str, int]]
 
 def workspace_stats(workspace: str) -> dict[str, int]:
     ensure_schema()
-    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+    with _connection_pool().connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM rag_documents WHERE workspace = %s", (workspace,))
         documents = int(cur.fetchone()[0])
         cur.execute("SELECT count(*) FROM rag_chunks WHERE workspace = %s", (workspace,))

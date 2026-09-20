@@ -57,6 +57,25 @@ class Settings(BaseSettings):
     """Overlap between consecutive chunks (env CHUNK_OVERLAP_SIZE)."""
     embedding_timeout_seconds: int = Field(default=120, validation_alias="EMBEDDING_TIMEOUT")
     """Embedding request timeout in seconds."""
+    embedding_query_batch_enabled: bool = Field(
+        default=True,
+        validation_alias="EMBEDDING_QUERY_BATCH_ENABLED",
+    )
+    """Dynamically batch concurrent single-query embedding calls in one process."""
+    embedding_query_batch_window_ms: int = Field(
+        default=10,
+        validation_alias="EMBEDDING_QUERY_BATCH_WINDOW_MS",
+        ge=1,
+        le=100,
+    )
+    """Maximum collection window for online-query embedding micro-batches."""
+    embedding_query_batch_size: int = Field(
+        default=16,
+        validation_alias="EMBEDDING_QUERY_BATCH_SIZE",
+        ge=2,
+        le=256,
+    )
+    """Maximum number of online queries sent in one embedding request."""
 
     @field_validator("embedding_mode", mode="before")
     @classmethod

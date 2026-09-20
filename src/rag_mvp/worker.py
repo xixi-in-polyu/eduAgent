@@ -14,7 +14,11 @@ from loguru import logger
 from rag_mvp.db import connect_sync
 from rag_mvp.logging_setup import configure_logging
 from rag_mvp.task_handlers import get_task_handler
-from rag_mvp.worker_async_loop import start_worker_async_loop, stop_worker_async_loop
+from rag_mvp.worker_async_loop import (
+    run_worker_coroutine,
+    start_worker_async_loop,
+    stop_worker_async_loop,
+)
 
 
 def _stream_name() -> str:
@@ -169,6 +173,9 @@ def main() -> None:
     idle_ms = _claim_idle_ms()
     r = redis.from_url(redis_url, decode_responses=True)
     conn = connect_sync(autocommit=True)
+    from rag_mvp.vector_store import ensure_schema
+
+    ensure_schema()
     stop = False
 
     def _stop(*_args: object) -> None:
@@ -190,12 +197,11 @@ def main() -> None:
         idle_ms,
     )
     logger.info(
-        "config | llm_model={} embedding_mode={} embedding_model={} embedding_dim={} rerank_model={}",
+        "config | llm_model={} embedding_mode={} embedding_model={} embedding_dim={}",
         _s.llm_model,
         _s.embedding_mode,
         _s.embedding_model,
         _s.embedding_dim,
-        _s.rerank_model or "(none)",
     )
     try:
         while not stop:
@@ -229,7 +235,16 @@ def main() -> None:
             except Exception:
                 logger.exception("Worker loop error")
     finally:
+        try:
+            from rag_mvp.embedding_factory import close_embedding_clients
+
+            run_worker_coroutine(close_embedding_clients(), timeout=30)
+        except Exception:
+            logger.exception("Failed to close embedding clients")
         stop_worker_async_loop()
+        from rag_mvp.vector_store import close_vector_pool
+
+        close_vector_pool()
         conn.close()
         logger.info("edu-rag-worker stopped")
 

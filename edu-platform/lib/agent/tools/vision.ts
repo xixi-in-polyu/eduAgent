@@ -1,6 +1,6 @@
 /**
  * Vision tool: analyzeImage
- * Lets the main chat model (e.g. deepseek-v4-pro) delegate image understanding
+ * Lets the main chat model (e.g. deepseek-flash) delegate image understanding
  * to the dedicated vision model (e.g. qwen3.6-plus) by passing image URLs and a question.
  */
 

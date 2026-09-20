@@ -16,7 +16,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from tests.eval._common import RESULTS_DIR, _bootstrap, load_json, save_json
+from tests.eval._common import (
+    RESULTS_DIR,
+    _bootstrap,
+    load_json,
+    non_thinking_extra_body,
+    save_json,
+)
 
 _bootstrap()
 
@@ -26,12 +32,16 @@ def _build_ragas_llm():
     from langchain_openai import ChatOpenAI  # type: ignore[import-untyped]
     from ragas.llms import LangchainLLMWrapper  # type: ignore[import-untyped]
 
+    extra_body = non_thinking_extra_body(
+        settings.effective_chat_base_url,
+        settings.effective_chat_model,
+    )
     llm = ChatOpenAI(
         model=settings.effective_chat_model,
         api_key=settings.effective_chat_api_key or "placeholder",
         base_url=settings.effective_chat_base_url,
         temperature=0.0,
-        extra_body={"enable_thinking": False},
+        extra_body=extra_body,
         max_retries=8,
     )
     return LangchainLLMWrapper(llm)
@@ -167,12 +177,16 @@ def _score_answer_correctness_batch(
     from langchain_openai import ChatOpenAI  # type: ignore[import-untyped]
     from langchain_core.messages import HumanMessage
 
+    extra_body = non_thinking_extra_body(
+        settings.effective_chat_base_url,
+        settings.effective_chat_model,
+    )
     llm = ChatOpenAI(
         model=settings.effective_chat_model,
         api_key=settings.effective_chat_api_key or "placeholder",
         base_url=settings.effective_chat_base_url,
         temperature=0.0,
-        extra_body={"enable_thinking": False},
+        extra_body=extra_body,
         max_retries=8,
     )
 

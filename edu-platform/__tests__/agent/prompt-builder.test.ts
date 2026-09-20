@@ -53,6 +53,12 @@ describe("PromptBuilder", () => {
     expect(prompt).toContain("已知掌握情况");
     expect(prompt).toContain("Safety Guidelines");
     expect(prompt).toContain("Tool Usage Guidelines");
+    expect(prompt.indexOf("Tool Usage Guidelines")).toBeLessThan(
+      prompt.indexOf("学习者画像"),
+    );
+    expect(prompt.indexOf("Tool Usage Guidelines")).toBeLessThan(
+      prompt.indexOf("已知掌握情况"),
+    );
   });
 
   it("业务规则：问答中心模式下应提示跨课程检索策略", () => {

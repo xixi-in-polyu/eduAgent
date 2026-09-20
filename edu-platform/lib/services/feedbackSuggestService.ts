@@ -19,7 +19,7 @@ function buildFimPrompt(body: SuggestFeedbackBody): string {
 
 /**
  * Generate an AI continuation suggestion for teacher feedback text.
- * Uses the 'completion' role (deepseek-v4-flash + beta FIM endpoint by default)
+ * Uses the 'completion' role (deepseek-flash + beta FIM endpoint by default)
  * so the model directly continues the teacher's partial comment without
  * rephrasing or wrapping in extra tags.
  */
@@ -37,7 +37,7 @@ export async function suggestFeedback(
   });
 
   // Use the OpenAI-compatible /completions endpoint (FIM / text-completion).
-  // deepseek-v4-flash on https://api.deepseek.com/beta supports this natively.
+  // deepseek-flash on https://api.deepseek.com/beta supports this natively.
   const resp = await client.completions.create({
     model: config.model,
     prompt,

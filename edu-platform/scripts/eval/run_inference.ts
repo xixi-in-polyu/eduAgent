@@ -79,7 +79,7 @@ function resolveModelConfig(): {
   memory: { model: string; baseURL: string };
 } {
   const defaultBase = getEnv("LLM_BASE_URL") ?? "(OpenAI default)";
-  const defaultModel = getEnv("LLM_MODEL") ?? "gpt-4o";
+  const defaultModel = getEnv("LLM_MODEL") ?? "deepseek-flash";
   const auxModel = getEnv("LLM_AUXILIARY_MODEL") ?? defaultModel;
 
   const chatBase = getEnv("LLM_CHAT_BASE_URL") ?? defaultBase;

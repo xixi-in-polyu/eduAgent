@@ -18,7 +18,13 @@ import argparse
 import json
 from pathlib import Path
 
-from tests.eval._common import DATA_DIR, RESULTS_DIR, _bootstrap, load_json
+from tests.eval._common import (
+    DATA_DIR,
+    RESULTS_DIR,
+    _bootstrap,
+    load_json,
+    non_thinking_extra_body,
+)
 
 _bootstrap()
 
@@ -41,12 +47,16 @@ def _build_ragas_llm():
     from langchain_openai import ChatOpenAI
     from ragas.llms import LangchainLLMWrapper
 
+    extra_body = non_thinking_extra_body(
+        settings.effective_chat_base_url,
+        settings.effective_chat_model,
+    )
     llm = ChatOpenAI(
         model=settings.effective_chat_model,
         api_key=settings.effective_chat_api_key or "placeholder",
         base_url=settings.effective_chat_base_url,
         temperature=0.0,
-        extra_body={"enable_thinking": False},
+        extra_body=extra_body,
         max_retries=8,
     )
     return LangchainLLMWrapper(llm)

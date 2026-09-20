@@ -47,6 +47,15 @@ def _bootstrap() -> None:
 
 _bootstrap()
 
+
+def non_thinking_extra_body(base_url: str, model: str) -> dict[str, object] | None:
+    """Return the provider-specific payload for deterministic non-thinking evals."""
+    if "deepseek.com" in base_url or model.lower().startswith("deepseek"):
+        return {"thinking": {"type": "disabled"}}
+    if "dashscope" in base_url or model.lower().startswith("qwen"):
+        return {"enable_thinking": False}
+    return None
+
 # ---------------------------------------------------------------------------
 # Deterministic IDs for eval infrastructure
 # (these are fixed, so re-runs reuse the same DB rows and vector RAG workspace)
@@ -452,12 +461,16 @@ def query_vector_direct(
     from langchain_core.messages import HumanMessage, SystemMessage
     from pydantic import SecretStr
 
+    extra_body = non_thinking_extra_body(
+        settings.effective_chat_base_url,
+        settings.effective_chat_model,
+    )
     llm = ChatOpenAI(
         model=settings.effective_chat_model,
         api_key=SecretStr(settings.effective_chat_api_key or "placeholder"),
         base_url=settings.effective_chat_base_url,
         temperature=0.0,
-        extra_body={"enable_thinking": False},
+        extra_body=extra_body,
     )
 
     # C3: Rewrite query for better semantic retrieval

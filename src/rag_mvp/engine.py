@@ -303,27 +303,72 @@ def _rrf_merge(
 
 
 async def _hybrid_workspace_search(
-    workspace: str, question: str, *, top_k: int
+    workspace: str,
+    question: str,
+    *,
+    top_k: int,
+    timings_ms: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     fetch_k = min(max(top_k * 2, top_k), 40)
-    dense, lexical = await asyncio.gather(
-        vector_search(workspace, question.strip(), top_k=fetch_k),
-        asyncio.to_thread(bm25_search, workspace, question.strip(), top_k=fetch_k),
-    )
+    loop = asyncio.get_running_loop()
+
+    async def _dense() -> list[dict[str, Any]]:
+        started = loop.time()
+        result = await vector_search(
+            workspace,
+            question.strip(),
+            top_k=fetch_k,
+            timings_ms=timings_ms,
+        )
+        if timings_ms is not None:
+            timings_ms["dense_total"] = (loop.time() - started) * 1000
+        return result
+
+    async def _lexical() -> list[dict[str, Any]]:
+        started = loop.time()
+        result = await asyncio.to_thread(
+            bm25_search,
+            workspace,
+            question.strip(),
+            top_k=fetch_k,
+        )
+        if timings_ms is not None:
+            timings_ms["bm25"] = (loop.time() - started) * 1000
+        return result
+
+    dense, lexical = await asyncio.gather(_dense(), _lexical())
     return _rrf_merge(dense, lexical, top_k=top_k)
 
 
 async def course_retrieval_hits(
-    course_id: str, question: str, *, top_k: int
+    course_id: str,
+    question: str,
+    *,
+    top_k: int,
+    timings_ms: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    hits = await _hybrid_workspace_search(course_workspace(course_id), question, top_k=top_k)
+    hits = await _hybrid_workspace_search(
+        course_workspace(course_id),
+        question,
+        top_k=top_k,
+        timings_ms=timings_ms,
+    )
     return _normalise_hits(hits, origin="course")
 
 
 async def personal_retrieval_hits(
-    user_id: str, question: str, *, top_k: int
+    user_id: str,
+    question: str,
+    *,
+    top_k: int,
+    timings_ms: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    hits = await _hybrid_workspace_search(personal_workspace(user_id), question, top_k=top_k)
+    hits = await _hybrid_workspace_search(
+        personal_workspace(user_id),
+        question,
+        top_k=top_k,
+        timings_ms=timings_ms,
+    )
     return _normalise_hits(hits, origin="personal")
 
 

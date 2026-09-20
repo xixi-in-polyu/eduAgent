@@ -71,7 +71,7 @@ describe("RAG Service integration", () => {
   // Uses vector search, which calls only the embedding API
   // and does not trigger an extra query-analysis LLM call.
   // This makes the test stable regardless of whether the LLM model supports
-  // JSON schema response_format (DeepSeek V4 Flash does NOT; deepseek-v4-pro does).
+  // Keep the integration payload compatible with DeepSeek Flash structured output.
   //
   // The endpoint returns { hits: HitItem[], warnings: string[] }.
   // hits may be empty when no documents are indexed yet — that is still 200 OK.

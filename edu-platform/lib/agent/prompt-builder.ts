@@ -23,6 +23,7 @@ const TOOL_GUIDANCE = `## Tool Usage Guidelines
   - Before the **2nd or later tool call** of the same turn:
     - **REQUIRED**: 1-2 sentences: (a) briefly describe what the previous search found, (b) state the new rewritten query. Format: "前次检索已获取 <summary of findings>，还需补充查询「<new rewritten query>」。"
 - **Single knowledge_query per question**: For each user question, call \`knowledge_query\` only ONCE (or at most twice if the first result is genuinely insufficient and covers a clearly different sub-topic). Do NOT re-query for the same information with different wording in successive iterations. Three or more \`knowledge_query\` calls for one question is almost always wrong.
+- **Decide query decomposition in that same tool call**: For a simple, single-intent question, omit \`sub_queries\`. If the user asks about 2–3 genuinely independent aspects that require separate retrieval, include 2–3 concise, self-contained \`sub_queries\` in the first \`knowledge_query\` call. Never split a simple definition or factual question, and never make a separate model call just to decide decomposition.
 - **Knowledge-QA hard rule (must follow)**:
   - Before answering any concept/principle/definition/factual question, first decide whether a course KB or personal KB is available in this session.
   - If at least one KB source is available, you MUST call \`knowledge_query\` first, and only answer after receiving its tool result.
@@ -137,20 +138,26 @@ export class PromptBuilder {
       }
     }
 
-    // 3. Course / QA mode block
+    // 3. Stable policy blocks. Keep these before user/session-specific context so
+    // provider-side prefix caching can reuse the longest possible prompt prefix.
+    parts.push(`\n${SAFETY_BLOCK}`);
+    parts.push(`\n${TOOL_GUIDANCE}`);
+
+    // 4. Course / QA mode block
     if (ctx.courseId) {
       parts.push(`\n${COURSE_MODE_BLOCK}`);
     } else {
       parts.push(`\n${buildQaCenterBlock(ctx)}`);
     }
 
-    // 3a. Current material context (when user is previewing a specific material)
+    // 5. Dynamic context. Keep all request/user-specific content at the end so
+    // it does not break the cacheable static prefix above.
     const materialBlock = buildCurrentMaterialBlock(ctx);
     if (materialBlock) {
       parts.push(`\n${materialBlock}`);
     }
 
-    // 4. Learner profile
+    // 6. Learner profile
     if (profile?.profile) {
       const name = (profile.profile as Record<string, unknown>)["name"] as string | undefined;
       const style = (profile.profile as Record<string, unknown>)["learning_style"] as string | undefined;
@@ -160,14 +167,10 @@ export class PromptBuilder {
       parts.push("\n" + profileLines.join("\n"));
     }
 
-    // 5. Memory context (retrieved concepts)
+    // 7. Memory context (retrieved concepts)
     if (memoryBlock.trim()) {
       parts.push(`\n## 已知掌握情况（近期记忆）\n${memoryBlock}`);
     }
-
-    // 6. Safety + tool guidance (always last, highest priority)
-    parts.push(`\n${SAFETY_BLOCK}`);
-    parts.push(`\n${TOOL_GUIDANCE}`);
 
     return parts.join("\n");
   }

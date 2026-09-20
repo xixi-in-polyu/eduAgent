@@ -269,7 +269,7 @@ async def llm_chat_model_func(
     history_messages: list | None = None,
     **kwargs,
 ) -> str:
-    """Chat / assignment LLM backed by the chat provider (e.g. DeepSeek deepseek-v4-pro).
+    """Chat / assignment LLM backed by the chat provider (e.g. DeepSeek deepseek-flash).
 
     Falls back to ``llm_model_func`` settings when LLM_CHAT_* env vars are not set.
     Used by assignment and question generation.
