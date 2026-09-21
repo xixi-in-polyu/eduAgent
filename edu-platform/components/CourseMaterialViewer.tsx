@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { PDFDocumentLoadingTask } from "pdfjs-dist";
 import { FileText, Hash, Loader2, AlertCircle, Download, ChevronLeft, ChevronRight } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -193,14 +194,15 @@ export default function CourseMaterialViewer({
       material.preview_pdf_status === "READY";
     if (ft !== "pdf" && !isOfficeReady) return;
     let cancelled = false;
+    let loadingTask: PDFDocumentLoadingTask | null = null;
     void (async () => {
       try {
         setPdfLoadError(null);
         // Dynamic import to avoid SSR issues
         const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-        pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs?v=legacy-5.7.284";
+        pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs?v=legacy-6.3.289";
         setPdfLoadProgress(0);
-        const loadingTask = pdfjsLib.getDocument({
+        loadingTask = pdfjsLib.getDocument({
           url: `${apiBase}/${materialId}/content`,
           withCredentials: true,
           rangeChunkSize: 65536,
@@ -213,7 +215,7 @@ export default function CourseMaterialViewer({
           }
         };
         const doc = await loadingTask.promise;
-        if (cancelled) { doc.destroy(); return; }
+        if (cancelled) return;
         pdfDocRef.current = doc;
         setPdfTotalPages(doc.numPages);
         setPdfPageNum(1);
@@ -231,7 +233,11 @@ export default function CourseMaterialViewer({
         }
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      void loadingTask?.destroy();
+      pdfDocRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [materialId, material?.file_type, material?.preview_pdf_status, material?.id, renderPdfPage, apiBase]);
 
