@@ -86,16 +86,22 @@ docker compose -f compose.yml -f compose.dev.yml up -d --build
 
 ```bash
 cd /opt/edu-agent
-docker compose pull
-docker compose up -d --no-build
+docker compose up -d --build --wait
 docker compose ps
+```
+
+以上源码构建方式不依赖容器仓库，适合 fork 首次部署。若已在 GitHub 仓库中启用 Actions，
+并由 CI/CD workflow 成功发布 GHCR 镜像，则可改用不可变镜像快速部署：
+
+```bash
+GITHUB_OWNER=xixi-in-polyu IMAGE_TAG=sha-<commit> docker compose pull
+GITHUB_OWNER=xixi-in-polyu IMAGE_TAG=sha-<commit> docker compose up -d --no-build --wait
 ```
 
 若 Ollama 或其他模型服务运行在 Linux 宿主机上，容器内地址应使用
 `http://host.docker.internal:<端口>`，不要使用 `localhost`。
 
-若不在服务器构建镜像，请设置 `GITHUB_OWNER=xixi-in-polyu` 和不可变的
-`IMAGE_TAG=sha-<commit>`，然后从 GHCR 拉取。使用 Cloudflare Tunnel 时运行：
+使用 Cloudflare Tunnel 时运行：
 
 ```bash
 docker compose --profile tunnel up -d

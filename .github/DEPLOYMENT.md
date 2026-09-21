@@ -31,6 +31,11 @@ create the MinIO bucket before the long-running services become healthy.
 Production runs immutable `sha-<commit>` image tags rather than relying on a
 mutable `latest` deployment.
 
+GitHub Actions must be enabled for a fork before this workflow can publish its
+GHCR images. Until the first successful image publication, deploy from the
+checked-out source with `docker compose up -d --build --wait` instead of using
+the pull-only production path.
+
 Next.js and the MinIO API are bound to `127.0.0.1:3000` and `127.0.0.1:9000`.
 Put TLS reverse proxies in front of both endpoints (and set
 `MINIO_PUBLIC_ENDPOINT`), or enable the optional `tunnel` profile. PostgreSQL,
