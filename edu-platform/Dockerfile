@@ -12,7 +12,8 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
 # prisma generate reads schema.prisma only — no live DB connection needed
 RUN npx prisma generate
 RUN npx next build

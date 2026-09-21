@@ -72,6 +72,32 @@ services:
       retries: 20
     logging: *default-logging
 
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    logging: *default-logging
+
+  ollama-init:
+    image: ollama/ollama:latest
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    command: ["pull", "${EMBEDDING_MODEL:-bge-m3}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    logging: *default-logging
+
   minio:
     image: ghcr.io/${GITHUB_OWNER:-xixi-in-polyu}/edu-minio:${IMAGE_TAG:-latest}
     build:
@@ -141,6 +167,7 @@ services:
     environment:
       <<: [*platform-database, *rag-database]
       REDIS_URL: redis://redis:6379
+      OLLAMA_BASE_URL: http://ollama:11434
       MINIO_ENDPOINT: http://minio:9000
       NEXTJS_INTERNAL_URL: http://nextjs:3000
       RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY:?RAG_SERVICE_API_KEY must be set}
@@ -162,6 +189,8 @@ services:
     depends_on:
       db-init:
         condition: service_completed_successfully
+      ollama-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     stop_grace_period: 30s
@@ -179,6 +208,7 @@ services:
     environment:
       <<: [*platform-database, *rag-database]
       REDIS_URL: redis://redis:6379
+      OLLAMA_BASE_URL: http://ollama:11434
       MINIO_ENDPOINT: http://minio:9000
       NEXTJS_INTERNAL_URL: http://nextjs:3000
       RAG_SERVICE_API_KEY: ${RAG_SERVICE_API_KEY:?RAG_SERVICE_API_KEY must be set}
@@ -195,6 +225,8 @@ services:
       redis:
         condition: service_healthy
       minio-init:
+        condition: service_completed_successfully
+      ollama-init:
         condition: service_completed_successfully
     stop_grace_period: 45s
     logging: *default-logging
@@ -275,3 +307,4 @@ volumes:
   redis_data:
   minio_data:
   model_cache:
+  ollama_data:
